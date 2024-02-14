@@ -3,8 +3,9 @@
 
 
 .generatePredatorPreyModel = function(path, r=0.5, l=0.2, alpha=0.1, gamma=0.1, K=100, T=100, 
-                                      N0=10, P0=1, ...) {
+                                      N0=10, P0=1, seed=0, ...) {
 
+  set.seed(seed)
   # 'real' parameters
   par_real = list(r=r, l=l, K=K, alpha=alpha, gamma=gamma, initial=list(N=N0, P=P0))
   
@@ -39,16 +40,31 @@
   calibrationInfo$variable  = c("prey", "predator")
   calibrationInfo$type      = "lnorm2"
   calibrationInfo$calibrate = TRUE
-  calibrationInfo$weights   = 1
-  calibrationInfo$useData   = TRUE
+  calibrationInfo$weight   = 1
+  calibrationInfo$use_data   = TRUE
+  calibrationInfo$file   = c("data/prey.csv", "data/predator.csv")
+  calibrationInfo$varid   = c("prey", "predator")
+  
   
   calibrationInfo = as.data.frame(calibrationInfo)
   
-  write.csv(calibrationInfo, file.path(main.folder, "calibrationInfo.csv"), row.names=FALSE)
-  
+  write.csv(calibrationInfo, file.path(main.folder, "calibration_settings.csv"), row.names=FALSE)
+
   constants = list(T=T)
   
-  output = c(list(path=main.folder, par=par_real), constants, parInfo)
+  output = c(list(setup=file.path(main.folder, "calibration_settings.csv"), 
+                  path = main.folder,
+                  par=par_real), constants, parInfo)
+  
+  setup = calibration_setup(file = output$setup)
+  observed = calibration_data(setup=setup, path=output$path)
+  
+  run_model = .PredatorPreyModel
+  
+  obj2 = calibration_objFn(model=run_model, setup=setup, observed=observed, T=T, 
+                           aggregate=TRUE)
+  
+  output$value = obj2(output$par)
   
   return(output)
   
@@ -57,7 +73,7 @@
 
 .PredatorPreyModel = function(par, T) {
   if(!requireNamespace("deSolve", quietly = TRUE)) 
-    stop("You need to install the 'deSolve' package.")# check on hadley
+    stop("You need to install the 'deSolve' package.")
   # par is a list with 'alpha', 'beta' 'gamma', 'sd' and 'mu_ini'.
   LV = function(t, y, parms, ...) {
     r = parms$r

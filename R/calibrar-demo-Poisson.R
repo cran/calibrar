@@ -1,16 +1,13 @@
 
 
-.generatePoissonMixedModel = function(path, alpha=0.4, beta=-0.4, T=10, L=6, N0=100, sd_env=0.3, 
+.generatePoissonMixedModel = function(path, alpha=0.4, beta=-0.4, T=10, L=6, N0=100, sd_env=0.3, seed=0,
                                       ...) {
   
   nsites = ceiling(log10(L+1))
   
-  sd = alpha/5
+  sd = alpha/2
   
-#   env  = matrix(rnorm(T*L, mean=0, sd=sd_env), nrow=T, ncol=L)
-#   env  = env/diff(range(env))
-#   env  = round(env, 4) + 1
-  
+  set.seed(seed)
   env  = matrix(rnorm(T*L, mean=0, sd=sd_env), nrow=T, ncol=L)
   env  = apply(env, 2, cumsum)
   env  = sweep(env, 2, STATS = colMeans(env), FUN = "-")
@@ -52,37 +49,57 @@
   
   parInfo = list()
   parInfo$guess = relist(c(0.2, 0.1, rep(0, T-1), par_real$sd, round(log(n[1,]),3)), par_real)
-  parInfo$lower = relist(c(0, -0.5, rep(-1.5, T-1), 0, round(rep(min(log(0.5*n[1,])),L),1)), par_real)
-  parInfo$upper = relist(c(1, 0.5, rep(1.5, T-1), 1, round(rep(max(log(1.5*n[1,])),L),1)), par_real)
-  parInfo$phase = relist(c(1, 1, rep(2, T-1), NA, rep(3, L)), par_real)
+  parInfo$lower = relist(c(0, -0.5, rep(-5*sd, T-1), 0, round(rep(min(log(0.5*n[1,])),L),1)), par_real)
+  parInfo$upper = relist(c(1, 0.5, rep(5*sd, T-1), 1, round(rep(max(log(1.5*n[1,])),L),1)), par_real)
+  parInfo$phase = relist(c(1, 1, rep(1, T-1), NA, rep(NA, L)), par_real)
   
   # calibrationInfo.csv
   
   calibrationInfo = list()
-  calibrationInfo$variable  = paste0("site_", sprintf(paste0("%0", nsites, "d"), seq_len(L)))
-  calibrationInfo$type      = "pois"
-  calibrationInfo$calibrate = TRUE
-  calibrationInfo$weights   = 1
-  calibrationInfo$useData   = TRUE
+  calibrationInfo$variable   = paste0("site_", sprintf(paste0("%0", nsites, "d"), seq_len(L)))
+  calibrationInfo$type       = "pois"
+  calibrationInfo$calibrate  = TRUE
+  calibrationInfo$weight     = 1
+  calibrationInfo$use_data   = TRUE
+  calibrationInfo$file       = file.path("data", paste0(calibrationInfo$variable, ".csv"))
+  calibrationInfo$varid      = paste0("L", sprintf(paste0("%0", nsites, "d"), seq_len(L)))
   
   calibrationInfo = as.data.frame(calibrationInfo)
   
   calibrationInfo2 = list()
-  calibrationInfo2$variable = "gammas"
-  calibrationInfo2$type     = "normp"
+  calibrationInfo2$variable  = "gammas"
+  calibrationInfo2$type      = "normp"
   calibrationInfo2$calibrate = TRUE
-  calibrationInfo2$weights   = 1/(2*sd^2)
-  calibrationInfo2$useData   = FALSE
+  calibrationInfo2$weight    = 1/(2*sd^2)
+  calibrationInfo2$use_data  = FALSE
+  calibrationInfo2$file      = NA 
+  calibrationInfo2$varid     = NA
   
   calibrationInfo2 = as.data.frame(calibrationInfo2)
   calibrationInfo = rbind(calibrationInfo, calibrationInfo2)
   
-  write.csv(calibrationInfo, file.path(main.folder, "calibrationInfo.csv"),
+  write.csv(calibrationInfo, file.path(main.folder, "calibration_settings.csv"),
             row.names=FALSE)
   
   constants = list(T=T, L=L)
   
-  output = c(list(path=main.folder, par=par_real), constants, parInfo)
+  output = c(list(path=main.folder, par=par_real, 
+                  setup=file.path(main.folder, "calibration_settings.csv")), constants, parInfo)
+ 
+  setup = calibration_setup(file = output$setup)
+  observed = calibration_data(setup=setup, path=output$path)
+  forcing = as.matrix(read.csv(file.path(output$path, "master", "environment.csv"), row.names=1))
+  
+  run_model = function(par, forcing) {
+    output = .PoissonMixedModel(par=par, forcing=forcing)
+    output = c(output, list(gammas=par$gamma)) # adding gamma parameters for penalties
+    return(output)
+  }
+  
+  obj2 = calibration_objFn(model=run_model, setup=setup, observed=observed, 
+                           forcing=forcing, aggregate=TRUE)
+  
+  output$value = obj2(output$par)
   
   return(output)
   
@@ -94,21 +111,24 @@
   # par is a list with 'alpha', 'beta' 'gamma', 'sd' and 'mu_ini'.
   T = nrow(forcing)
   L = ncol(forcing)
-  forcing = as.matrix(forcing)
   alpha  = par$alpha
   beta   = par$beta
   gamma  = if(!is.null((par$gamma))) par$gamma else rep(0, T-1)
-  gamma  = gamma - mean(gamma)
-  mu_ini = exp(par$mu_ini)
+  # gamma  = gamma - mean(gamma)
   
-  mu = matrix(nrow=T, ncol=L)
+  mu = matrix(exp(par$mu_ini), nrow=T, ncol=L, byrow = TRUE)
   
-  mu[1,] = mu_ini
+  # mu[1,] = mu_ini
   
-  for(t in seq_len(T-1)) {
-    log_mu_new = log(mu[t,]) + alpha + beta*forcing[t,] + gamma[t]
-    mu[t+1, ] = exp(log_mu_new)
-  }
+  rate = exp(apply(rbind(0, alpha + beta*forcing[-T, ] + gamma), 2, cumsum))
+  mu   = mu*rate 
+
+  # for(t in seq_len(T-1)) {
+  #   # log_mu_new = log(mu[t,]) + alpha + beta*forcing[t,] + gamma[t]
+  #   # log_mu_new = log(mu[t,]) + r0[t,]
+  #   # mu[t+1, ] = exp(log_mu_new)
+  #   mu[t+1, ] = mu[t, ]*r0[t, ]
+  # }
   
   output = as.list(as.data.frame(mu)) # return a list with the results
   # names of the outputs matching observed data names
@@ -116,4 +136,3 @@
   
   return(output)
 }
-
